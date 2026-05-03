@@ -1,4 +1,8 @@
 # train_longevity.py
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from src.models import train_random_forest, train_linear_regression, evaluate_regressor, save_model
@@ -6,26 +10,29 @@ from src.models import train_random_forest, train_linear_regression, evaluate_re
 # 1. Load data
 df = pd.read_csv('data/final_processed_dataset.csv')
 
-# 2. Create target (Generations of Viability proxy from stat_tier)
-tier_map = {
-    'Weak (<300)': 1,
-    'Below Average (300-399)': 2,
-    'Average (400-499)': 3,
-    'Strong (500-599)': 4,
-    'Legendary/Pseudo (600+)': 5
-}
-df['longevity_target'] = df['stat_tier'].map(tier_map)
+# 2. Create target (Generations of Viability) from base_stat_total
+#    Map BST ranges to 1-5 scale (1=short-lived, 5=long-lived)
+def bst_to_generations(bst):
+    if bst < 300:
+        return 1
+    elif bst < 400:
+        return 2
+    elif bst < 500:
+        return 3
+    elif bst < 600:
+        return 4
+    else:
+        return 5
+
+df['longevity_target'] = df['base_stat_total'].apply(bst_to_generations)
 
 # 3. Add required features: Stat Efficiency & Type Coverage
-# Stat Efficiency = base_stat_total / average base_stat_total (global average)
 avg_bst = df['base_stat_total'].mean()
 df['stat_efficiency'] = df['base_stat_total'] / avg_bst
-
-# Type Coverage = num_types (1 or 2) – simple but acceptable
-df['type_coverage'] = df['num_types']
+df['type_coverage'] = df['num_types']  # or df['num_types'] * 1.5 for dual types
 
 # 4. Prepare features (drop non-feature columns)
-X = df.drop(columns=['pokedex_id', 'base_stat_total', 'stat_tier', 'longevity_target'])
+X = df.drop(columns=['pokedex_id', 'base_stat_total', 'longevity_target'])
 y = df['longevity_target']
 
 # 5. Split data
@@ -48,7 +55,7 @@ print("Linear Regression - RMSE: {:.3f}, MAE: {:.3f}, R2: {:.3f}".format(
 save_model(rf_model, 'models/longevity_RandomForest.joblib')
 save_model(lr_model, 'models/longevity_LinearRegression.joblib')
 
-# 9. Save the best model as longevity_regressor.joblib (based on lower MAE)
+# 9. Save the best model as longevity_regressor.joblib
 if rf_metrics['mae'] < lr_metrics['mae']:
     best_model = rf_model
     best_name = "Random Forest"
