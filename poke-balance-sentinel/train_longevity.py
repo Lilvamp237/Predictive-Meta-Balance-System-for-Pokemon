@@ -64,4 +64,4 @@ else:
     best_name = "Linear Regression"
 
 save_model(best_model, 'models/longevity_regressor.joblib')
-print(f"\n✅ Best model: {best_name} saved as longevity_regressor.joblib")
+print(f"\n✅ ✔️Best model: {best_name} saved as longevity_regressor.joblib")
