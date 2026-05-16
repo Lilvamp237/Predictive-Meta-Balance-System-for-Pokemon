@@ -1,0 +1,8 @@
+,Accuracy,F1 Score,Silhouette Score
+Logistic Regression,0.9951,0.9952,
+Random Forest,0.9756,0.976,
+Isolation Forest (Unsupervised),N/A,N/A,0.7497
+LR (Tuned by Sasini),0.9951,0.9952,
+RF (Tuned by Sasini),0.9756,0.976,
+LR,0.9951,0.9952,
+RF,0.9756,0.976,
