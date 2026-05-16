@@ -41,3 +41,10 @@ def save_model(model, model_path: str | Path) -> None:
 
 def load_model(model_path: str | Path):
     return joblib.load(model_path)
+
+from sklearn.linear_model import LinearRegression
+
+def train_linear_regression(X_train, y_train) -> LinearRegression:
+    model = LinearRegression()
+    model.fit(X_train, y_train)
+    return model
