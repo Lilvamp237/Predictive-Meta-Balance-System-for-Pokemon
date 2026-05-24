@@ -38,23 +38,6 @@ LONGEVITY_FEATURES = [
 
 TYPE_OPTIONS = ["None"] + [t.capitalize() for t in ALL_TYPES]
 
-BALANCE_RISK_MODEL_OPTIONS = [
-    ("Supervised (best_balance_risk_model.joblib)", "balance_risk", "sklearn Pipeline"),
-    ("Unsupervised (unsupervised_balance_risk_pipeline.joblib)", "balance_risk_unsupervised", "IsolationForest Pipeline"),
-]
-
-MODEL_FILES = {
-    "balance_risk": "best_balance_risk_model.joblib",
-    "balance_risk_unsupervised": "unsupervised_balance_risk_pipeline.joblib",
-    "longevity": "longevity_regressor.joblib",
-}
-
-MODEL_SPECS = [
-    ("Balance Risk (Supervised)", "balance_risk", "sklearn Pipeline"),
-    ("Balance Risk (Unsupervised)", "balance_risk_unsupervised", "IsolationForest Pipeline"),
-    ("Longevity", "longevity", "Random Forest Regressor"),
-]
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Model loading  (ML logic - unchanged)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -63,7 +46,10 @@ MODEL_SPECS = [
 def load_models():
     import joblib
     models = {}
-    for name, filename in MODEL_FILES.items():
+    for name, filename in [
+        ("balance_risk", "best_balance_risk_model.joblib"),
+        ("longevity", "longevity_regressor.joblib"),
+    ]:
         path = ROOT / "models" / filename
         if path.exists():
             try:
@@ -151,56 +137,6 @@ def align_features(row: dict, feature_list: list, model) -> pd.DataFrame:
         raise ValueError(f"Missing features: {missing}")
 
     return pd.DataFrame([{f: row[f] for f in feature_list}])
-
-
-def split_binary_probabilities(model, proba: np.ndarray) -> tuple[float, float]:
-    if len(proba) < 2:
-        raise ValueError("Balance Risk model returned invalid probabilities.")
-    classes = getattr(model, "classes_", None)
-    if classes is None:
-        return float(proba[0]), float(proba[1])
-    classes = list(classes)
-    if len(classes) == 2 and 0 in classes and 1 in classes:
-        idx0 = classes.index(0)
-        idx1 = classes.index(1)
-        return float(proba[idx0]), float(proba[idx1])
-    return float(proba[0]), float(proba[1])
-
-
-def anomaly_score_to_probabilities(score: float) -> tuple[float, float]:
-    p_risky = 1.0 / (1.0 + np.exp(score))
-    return 1.0 - p_risky, p_risky
-
-
-def run_balance_risk_prediction(model, X: pd.DataFrame) -> tuple[int, float, float, float, float | None]:
-    if hasattr(model, "predict_proba"):
-        proba = model.predict_proba(X)[0]
-        p_balanced, p_risky = split_binary_probabilities(model, proba)
-        predicted_label = model.predict(X)[0]
-        risk_class = 1 if int(predicted_label) == 1 else 0
-        confidence = max(p_balanced, p_risky) * 100
-        classes = getattr(model, "classes_", None)
-        if classes is not None:
-            classes = list(classes)
-            if predicted_label in classes:
-                confidence = float(proba[classes.index(predicted_label)]) * 100
-        return risk_class, confidence, p_balanced, p_risky, None
-
-    if hasattr(model, "decision_function"):
-        score = float(model.decision_function(X)[0])
-    elif hasattr(model, "score_samples"):
-        score = float(model.score_samples(X)[0])
-    else:
-        raise ValueError("Selected balance risk model does not support probability or anomaly scoring.")
-
-    p_balanced, p_risky = anomaly_score_to_probabilities(score)
-    predicted_label = model.predict(X)[0]
-    if predicted_label in (-1, 1):
-        risk_class = 1 if int(predicted_label) == -1 else 0
-    else:
-        risk_class = 1 if float(predicted_label) > 0 else 0
-    confidence = max(p_balanced, p_risky) * 100
-    return risk_class, confidence, p_balanced, p_risky, score
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Page config
@@ -746,32 +682,11 @@ with st.sidebar:
 
     st.divider()
 
-    st.markdown('<div class="section-label">Balance Risk Model</div>', unsafe_allow_html=True)
-    available_balance_models = [
-        (label, key)
-        for label, key, _ in BALANCE_RISK_MODEL_OPTIONS
-        if models.get(key)
-    ]
-    if available_balance_models:
-        balance_model_labels = [label for label, _ in available_balance_models]
-        if len(balance_model_labels) > 1:
-            selected_balance_label = st.selectbox(
-                "Balance Risk Model",
-                balance_model_labels,
-                label_visibility="collapsed",
-            )
-        else:
-            selected_balance_label = balance_model_labels[0]
-            st.caption(f"Using: {selected_balance_label}")
-        balance_model_key = dict(available_balance_models)[selected_balance_label]
-    else:
-        balance_model_key = None
-        st.caption("No Balance Risk models found in /models.")
-
-    st.divider()
-
     st.markdown('<div class="section-label">Loaded Models</div>', unsafe_allow_html=True)
-    for display_name, key, arch in MODEL_SPECS:
+    for display_name, key, arch in [
+        ("Balance Risk", "balance_risk", "sklearn Pipeline"),
+        ("Longevity",    "longevity",    "Random Forest Regressor"),
+    ]:
         dot_color = "#22C55E" if models.get(key) else "#EF4444"
         status    = "Loaded" if models.get(key) else "Not found"
         st.markdown(
@@ -930,32 +845,27 @@ with tab1:
     st.markdown('<div class="section-title" style="margin-top:0.5rem;">Balance Risk Classification</div>', unsafe_allow_html=True)
     st.caption(
         "Classifies whether this Pokemon is likely to be competitively balanced "
-        "or a high-risk pick in the meta. Powered by a trained sklearn Pipeline model."
+        "or a high-risk pick in the meta. Powered by a trained sklearn Pipeline classifier."
     )
     st.markdown("")
 
-    balance_model = models.get(balance_model_key) if balance_model_key else None
-    balance_model_is_unsupervised = balance_model_key == "balance_risk_unsupervised"
-
     if feature_error:
         st.error(f"Feature engineering error: {feature_error}")
-    elif balance_model is None:
-        expected_files = ", ".join(
-            f"models/{MODEL_FILES[key]}" for key in ("balance_risk", "balance_risk_unsupervised")
-        )
+    elif models["balance_risk"] is None:
         st.error(
             "Balance Risk model could not be loaded. "
-            f"Ensure one of the following files exists in the project root: {expected_files}."
+            "Ensure `models/best_balance_risk_model.joblib` exists in the project root."
         )
     else:
         if st.button("Run Balance Risk Prediction", type="primary"):
             with st.spinner("Running classifier..."):
                 try:
-                    X = align_features(feature_row, BALANCE_RISK_FEATURES, balance_model)
-                    risk_class, confidence, p_balanced, p_risky, anomaly_score = run_balance_risk_prediction(
-                        balance_model,
-                        X,
-                    )
+                    X = align_features(feature_row, BALANCE_RISK_FEATURES, models["balance_risk"])
+                    prediction = models["balance_risk"].predict(X)[0]
+                    proba      = models["balance_risk"].predict_proba(X)[0]
+
+                    risk_class = int(prediction)
+                    confidence = float(proba[risk_class]) * 100
 
                     st.markdown('<div class="section-label" style="margin-top:1rem;">Verdict</div>', unsafe_allow_html=True)
 
@@ -981,9 +891,7 @@ with tab1:
                     render_confidence_bar("Model Confidence in Predicted Class", confidence, bar_color)
 
                     st.markdown('<div class="section-label" style="margin-top:1rem;">Class Probabilities</div>', unsafe_allow_html=True)
-                    render_prob_split(p_balanced, p_risky)
-                    if balance_model_is_unsupervised:
-                        st.caption("Unsupervised model: probabilities are derived from anomaly scoring.")
+                    render_prob_split(proba[0], proba[1])
 
                 except ValueError as e:
                     st.error(f"Feature alignment error: {e}")
@@ -993,33 +901,24 @@ with tab1:
     st.markdown("")
 
     with st.expander("How this prediction works"):
-        if balance_model_is_unsupervised:
-            st.markdown(
-                "The Balance Risk model is an **unsupervised IsolationForest pipeline**. "
-                "It detects anomalous stat profiles relative to historical Pokemon data. "
-                "Anomaly scores are converted into a 0–1 risk probability using a sigmoid "
-                "so higher risk indicates a more outlier-like design. "
-                "This model uses 39 input features, including base stat totals and derived offense metrics."
-            )
-        else:
-            st.markdown(
-                "The Balance Risk model is a trained **sklearn Pipeline** (with internal preprocessing). "
-                "It was trained on historical Pokemon data and classifies each Pokemon into one of two categories:\n\n"
-                "| Class | Label |\n"
-                "|---|---|\n"
-                "| 0 | Balanced / Low Risk |\n"
-                "| 1 | High Balance Risk |\n\n"
-                "The model uses 37 input features: base stats, physical attributes, game metadata, "
-                "and one-hot encoded type flags. Feature alignment is performed automatically using "
-                "`model.feature_names_in_` to prevent ordering errors."
-            )
+        st.markdown(
+            "The Balance Risk model is a trained **sklearn Pipeline** (with internal preprocessing). "
+            "It was trained on historical Pokemon data and classifies each Pokemon into one of two categories:\n\n"
+            "| Class | Label |\n"
+            "|---|---|\n"
+            "| 0 | Balanced / Low Risk |\n"
+            "| 1 | High Balance Risk |\n\n"
+            "The model uses 37 input features: base stats, physical attributes, game metadata, "
+            "and one-hot encoded type flags. Feature alignment is performed automatically using "
+            "`model.feature_names_in_` to prevent ordering errors."
+        )
 
     with st.expander("Input features sent to this model"):
         if feature_row is not None:
             try:
                 model_features = (
-                    list(balance_model.feature_names_in_)
-                    if balance_model is not None and hasattr(balance_model, "feature_names_in_")
+                    list(models["balance_risk"].feature_names_in_)
+                    if hasattr(models["balance_risk"], "feature_names_in_")
                     else BALANCE_RISK_FEATURES
                 )
                 preview = {f: feature_row[f] for f in model_features if f in feature_row}
