@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
+from typing import Literal
 
 import joblib
 import numpy as np
@@ -9,162 +9,159 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
 
-def _to_snake_case(name: str) -> str:
-    name = str(name)
-    name = name.strip()
-    name = name.replace("\n", " ")
-    # replace non-alphanumeric with underscore
-    name = "".join([c if c.isalnum() else "_" for c in name])
-    # collapse underscores
-    name = "_".join([p for p in name.split("_") if p != ""])
-    return name.lower()
+BASE_STATS = ["hp", "attack", "defense", "sp_attack", "sp_defense", "speed"]
+TYPE_COLS = ["type_1", "type_2"]
 
 
 def load_data(path: str | Path) -> pd.DataFrame:
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Input file not found: {path}")
-    df = pd.read_csv(path)
-    return df
+    return pd.read_csv(path)
 
 
 def clean_data(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    # Drop duplicates
     df = df.drop_duplicates()
 
-    # Fill missing values for numerical columns with median
     num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     for col in num_cols:
         if df[col].isna().any():
             df[col] = df[col].fillna(df[col].median())
 
-    # Fill missing for object/categorical columns with mode or 'Unknown'
-    obj_cols = df.select_dtypes(include=[object]).columns.tolist()
+    obj_cols = df.select_dtypes(include=["object"]).columns.tolist()
     for col in obj_cols:
         if df[col].isna().any():
             mode = df[col].mode()
-            if len(mode) > 0 and pd.notna(mode.iloc[0]):
-                df[col] = df[col].fillna(mode.iloc[0])
-            else:
-                df[col] = df[col].fillna("Unknown")
+            df[col] = df[col].fillna(mode.iloc[0] if not mode.empty else "Unknown")
 
     return df
 
 
-def _ensure_base_stat_total(df: pd.DataFrame) -> None:
-    required = {"hp", "attack", "defense", "sp_attack", "sp_defense", "speed"}
-    if not required.issubset(df.columns):
-        missing = sorted(required - set(df.columns))
+def _validate_base_stats(df: pd.DataFrame) -> None:
+    missing = [c for c in BASE_STATS if c not in df.columns]
+    if missing:
         raise ValueError(f"Missing base stat columns: {missing}")
-    if "base_stat_total" not in df.columns:
-        df["base_stat_total"] = df["hp"] + df["attack"] + df["defense"] + df["sp_attack"] + df["sp_defense"] + df["speed"]
 
 
-def encode_types(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    # Ensure type columns exist
+def _normalize_type_value(series: pd.Series) -> pd.Series:
+    return (
+        series.fillna("")
+        .astype(str)
+        .str.strip()
+        .replace({"nan": "", "None": "", "none": "", "Unknown": "", "unknown": ""})
+    )
+
+
+def fit_type_columns(df: pd.DataFrame) -> list[str]:
     if "type_1" not in df.columns:
-        raise ValueError("type_1 column required for type encoding")
-    if "type_2" not in df.columns:
-        df["type_2"] = ""
+        raise ValueError("type_1 column is required.")
+    temp = df.copy()
+    temp["type_1"] = _normalize_type_value(temp["type_1"])
+    temp["type_2"] = _normalize_type_value(temp["type_2"]) if "type_2" in temp.columns else ""
 
-    # Normalize and fill
-    df["type_1"] = df["type_1"].astype(str).fillna("Unknown").str.strip()
-    df["type_2"] = df["type_2"].astype(str).fillna("").str.strip()
+    all_types = sorted(set(temp["type_1"].unique()) | set(temp["type_2"].unique()))
+    all_types = [t for t in all_types if t]
+    return [f"type_{t.lower()}" for t in all_types]
 
-    all_types = set(df["type_1"].unique()) | set(df["type_2"].unique())
-    # remove empty/unknown
-    all_types = {t for t in all_types if t and str(t).lower() not in {"nan", "unknown", "none"}}
 
-    for t in sorted(all_types):
-        col = f"type_{str(t).lower()}"
-        df[col] = ((df["type_1"] == t) | (df["type_2"] == t)).astype(int)
+def encode_types(df: pd.DataFrame, expected_type_cols: list[str] | None = None) -> pd.DataFrame:
+    df = df.copy()
+    if "type_1" not in df.columns:
+        raise ValueError("type_1 column is required.")
 
-    # Drop original type columns
-    df = df.drop(columns=[c for c in ["type_1", "type_2"] if c in df.columns])
+    df["type_1"] = _normalize_type_value(df["type_1"])
+    df["type_2"] = _normalize_type_value(df["type_2"]) if "type_2" in df.columns else ""
+
+    if expected_type_cols is None:
+        expected_type_cols = fit_type_columns(df)
+
+    raw_types = [c.replace("type_", "") for c in expected_type_cols]
+
+    for t in raw_types:
+        col = f"type_{t}"
+        df[col] = (
+            (df["type_1"].str.lower() == t) |
+            (df["type_2"].str.lower() == t)
+        ).astype(int)
+
+    df["num_types"] = ((df["type_1"] != "").astype(int) + (df["type_2"] != "").astype(int)).clip(upper=2)
+
+    return df.drop(columns=[c for c in TYPE_COLS if c in df.columns], errors="ignore")
+
+
+def _fit_scaler(df: pd.DataFrame) -> StandardScaler:
+    scaler = StandardScaler()
+    scaler.fit(df[BASE_STATS])
+    return scaler
+
+
+def _apply_scaler(df: pd.DataFrame, scaler: StandardScaler) -> pd.DataFrame:
+    df = df.copy()
+    df[BASE_STATS] = scaler.transform(df[BASE_STATS])
     return df
 
 
-def scale_base_stats(df: pd.DataFrame, scaler: StandardScaler | None = None) -> tuple[pd.DataFrame, StandardScaler]:
-    df = df.copy()
-    _ensure_base_stat_total(df)
-    stat_cols = ["hp", "attack", "defense", "sp_attack", "sp_defense", "speed"]
-    for c in stat_cols:
-        if c not in df.columns:
-            raise ValueError(f"Missing stat column: {c}")
-
-    if scaler is None:
-        scaler = StandardScaler()
-        df[stat_cols] = scaler.fit_transform(df[stat_cols])
-    else:
-        df[stat_cols] = scaler.transform(df[stat_cols])
-
-    return df, scaler
-
-
-def save_scaler(scaler: StandardScaler, path: str | Path) -> None:
+def save_artifact(obj, path: str | Path) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump(scaler, path)
+    joblib.dump(obj, path)
 
 
-def generate_final_dataset(
-    input_path: str | Path = "data/pokemon_complete_2025.csv",
-    output_path: str | Path = "data/final_processed_dataset.csv",
+def load_artifact(path: str | Path):
+    return joblib.load(path)
+
+
+def preprocess_for_training(
+    input_path: str | Path,
     scaler_path: str | Path = "models/scaler.joblib",
-) -> pd.DataFrame:
-    """
-    Generate one final processed dataset for the whole team.
-
-    Steps:
-    - Load raw data
-    - Clean missing values and duplicates
-    - Feature engineer types into one-hot
-    - Scale base stats (hp, attack, defense, sp_attack, sp_defense, speed)
-    - Keep only numeric columns and the one-hot type columns
-    - Ensure no missing values and numeric-only columns
-    - Save final CSV and scaler
-    """
-    input_path = Path(input_path)
-    output_path = Path(output_path)
-    scaler_path = Path(scaler_path)
-
-    # Load
+    feature_mode: Literal["balance", "longevity"] = "balance",
+) -> tuple[pd.DataFrame, StandardScaler, list[str] | None]:
     df = load_data(input_path)
-
-    # Clean
     df = clean_data(df)
+    _validate_base_stats(df)
 
-    # Ensure base stat total exists
-    _ensure_base_stat_total(df)
+    scaler = _fit_scaler(df)
+    save_artifact(scaler, scaler_path)
 
-    # Encode types
-    df = encode_types(df)
+    df = _apply_scaler(df, scaler)
 
-    # Scale base stats (fit scaler)
-    df, scaler = scale_base_stats(df, scaler=None)
+    if feature_mode == "balance":
+        X = df[BASE_STATS].copy()
+        return X, scaler, None
 
-    # Select only numeric columns (keep one-hot ints and numeric features)
-    numeric_df = df.select_dtypes(include=[np.number]).copy()
+    if feature_mode == "longevity":
+        expected_type_cols = fit_type_columns(df)
+        df = encode_types(df, expected_type_cols=expected_type_cols)
+        X = df[BASE_STATS + ["num_types"] + expected_type_cols].copy()
+        return X, scaler, expected_type_cols
 
-    # Ensure no missing values remain (fill with median as final safety)
-    for col in numeric_df.columns:
-        if numeric_df[col].isna().any():
-            numeric_df[col] = numeric_df[col].fillna(numeric_df[col].median())
-
-    # Clean column names to snake_case
-    numeric_df.columns = [_to_snake_case(c) for c in numeric_df.columns]
-
-    # Save final CSV
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    numeric_df.to_csv(output_path, index=False)
-
-    # Save scaler
-    save_scaler(scaler, scaler_path)
-
-    return numeric_df
+    raise ValueError("feature_mode must be 'balance' or 'longevity'")
 
 
-if __name__ == "__main__":
-    generate_final_dataset()
+def preprocess_for_inference(
+    input_data: str | Path | pd.DataFrame,
+    scaler_path: str | Path = "models/scaler.joblib",
+    feature_mode: Literal["balance", "longevity"] = "balance",
+    type_cols_path: str | Path = "models/type_columns.joblib",
+) -> pd.DataFrame:
+    if isinstance(input_data, pd.DataFrame):
+        df = input_data.copy()
+    else:
+        df = load_data(input_data)
+
+    df = clean_data(df)
+    _validate_base_stats(df)
+
+    scaler = load_artifact(scaler_path)
+    df = _apply_scaler(df, scaler)
+
+    if feature_mode == "balance":
+        return df[BASE_STATS].copy()
+
+    if feature_mode == "longevity":
+        expected_type_cols = load_artifact(type_cols_path)
+        df = encode_types(df, expected_type_cols=expected_type_cols)
+        return df[BASE_STATS + ["num_types"] + expected_type_cols].copy()
+
+    raise ValueError("feature_mode must be 'balance' or 'longevity'")
