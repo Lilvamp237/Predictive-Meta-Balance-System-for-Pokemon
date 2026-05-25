@@ -20,21 +20,25 @@ ALL_TYPES = [
     "psychic", "rock", "steel", "water",
 ]
 
+# balance risk now uses an unsupervised model from only the six base stats.
 BALANCE_RISK_FEATURES = [
-    "num_types", "hp", "attack", "defense", "sp_attack", "sp_defense",
-    "speed", "height_m", "weight_kg", "base_experience", "capture_rate",
-    "base_happiness", "hatch_counter", "gender_rate", "bmi",
-    "attack_defense_ratio", "physical_total", "special_total",
-    "defensive_total",
-] + [f"type_{t}" for t in ALL_TYPES]
+    "hp",
+    "attack",
+    "defense",
+    "sp_attack",
+    "sp_defense",
+    "speed",
+]
 
+#longevity uses Random Forest with six base stats plus Types
 LONGEVITY_FEATURES = [
-    "num_types", "hp", "attack", "defense", "sp_attack", "sp_defense",
-    "speed", "height_m", "weight_kg", "base_experience", "capture_rate",
-    "base_happiness", "hatch_counter", "gender_rate", "bmi",
-    "attack_defense_ratio", "physical_total", "special_total",
-    "offensive_total", "defensive_total",
-] + [f"type_{t}" for t in ALL_TYPES] + ["stat_efficiency", "type_coverage"]
+    "hp",
+    "attack",
+    "defense",
+    "sp_attack",
+    "sp_defense",
+    "speed",
+] + [f"type_{t}" for t in ALL_TYPES]
 
 TYPE_OPTIONS = ["None"] + [t.capitalize() for t in ALL_TYPES]
 
@@ -45,66 +49,58 @@ TYPE_OPTIONS = ["None"] + [t.capitalize() for t in ALL_TYPES]
 @st.cache_resource
 def load_models():
     import joblib
+
     models = {}
-    for name, filename in [
-        ("balance_risk", "best_balance_risk_model.joblib"),
-        ("longevity", "longevity_regressor.joblib"),
-    ]:
-        path = ROOT / "models" / filename
+
+    paths = {
+        "balance_risk": ROOT / "models" / "balance_risk_kmeans.joblib",
+        "balance_label_map": ROOT / "models" / "balance_label_map.joblib",
+        "longevity": ROOT / "models" / "longevity_random_forest.joblib",
+        "scaler": ROOT / "models" / "scaler.joblib",
+        "type_columns": ROOT / "models" / "type_columns.joblib",
+    }
+
+    for key, path in paths.items():
         if path.exists():
             try:
-                models[name] = joblib.load(path)
+                models[key] = joblib.load(path)
             except Exception as e:
-                models[name] = None
-                st.error(f"Failed to load {filename}: {e}")
+                models[key] = None
+                st.error(f"Failed to load {path.name}: {e}")
         else:
-            models[name] = None
-    return models
+            models[key] = None
 
+    return models
 # ─────────────────────────────────────────────────────────────────────────────
 # Feature engineering  (ML logic - unchanged)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_feature_row(
-    num_types, hp, attack, defense, sp_attack, sp_defense, speed,
-    height_m, weight_kg, base_experience, capture_rate,
-    base_happiness, hatch_counter, gender_rate,
-    primary_type, secondary_type,
+#Updated the build_feature_row() function by splitting this into two dedicated builders: one for balance risk, one for longevity.
+def build_balance_risk_row(
+    hp, attack, defense, sp_attack, sp_defense, speed
 ) -> dict:
-    base_stat_total = hp + attack + defense + sp_attack + sp_defense + speed
-    bmi = weight_kg / (height_m ** 2) if height_m > 0 else 0.0
-    attack_defense_ratio = attack / defense if defense > 0 else 0.0
-    physical_total = attack + defense
-    special_total = sp_attack + sp_defense
-    offensive_total = attack + sp_attack + speed
-    defensive_total = hp + defense + sp_defense
-    stat_efficiency = base_stat_total / 600.0
-    type_coverage = num_types
-
-    row = {
-        "num_types": num_types,
+    return {
         "hp": hp,
         "attack": attack,
         "defense": defense,
         "sp_attack": sp_attack,
         "sp_defense": sp_defense,
         "speed": speed,
-        "height_m": height_m,
-        "weight_kg": weight_kg,
-        "base_experience": base_experience,
-        "capture_rate": capture_rate,
-        "base_happiness": base_happiness,
-        "hatch_counter": hatch_counter,
-        "gender_rate": gender_rate,
-        "bmi": bmi,
-        "attack_defense_ratio": attack_defense_ratio,
-        "physical_total": physical_total,
-        "special_total": special_total,
-        "offensive_total": offensive_total,
-        "defensive_total": defensive_total,
-        "stat_efficiency": stat_efficiency,
-        "type_coverage": type_coverage,
-        "base_stat_total": base_stat_total,
+    }
+
+
+def build_longevity_row(
+    hp, attack, defense, sp_attack, sp_defense, speed,
+    primary_type, secondary_type,
+    type_columns=None,
+) -> dict:
+    row = {
+        "hp": hp,
+        "attack": attack,
+        "defense": defense,
+        "sp_attack": sp_attack,
+        "sp_defense": sp_defense,
+        "speed": speed,
     }
 
     selected_types = set()
@@ -113,29 +109,23 @@ def build_feature_row(
     if secondary_type and secondary_type.lower() != "none":
         selected_types.add(secondary_type.lower())
 
-    for t in ALL_TYPES:
-        row[f"type_{t}"] = 1 if t in selected_types else 0
+    all_type_columns = type_columns if type_columns is not None else [f"type_{t}" for t in ALL_TYPES]
+    for col in all_type_columns:
+        row[col] = 0
+
+    for t in selected_types:
+        col = f"type_{t}"
+        if col in row:
+            row[col] = 1
 
     return row
 
-
-def align_features(row: dict, feature_list: list, model) -> pd.DataFrame:
-    """Build a single-row DataFrame aligned to the model's expected features."""
-    try:
-        if hasattr(model, "feature_names_in_"):
-            feature_list = list(model.feature_names_in_)
-        elif hasattr(model, "steps"):
-            for _, step in model.steps:
-                if hasattr(step, "feature_names_in_"):
-                    feature_list = list(step.feature_names_in_)
-                    break
-    except Exception:
-        pass
-
+#removed the old align_features
+#this align features trying to explicitly control the inputs to fix the leakage-related design changes.
+def align_features(row: dict, feature_list: list) -> pd.DataFrame:
     missing = [f for f in feature_list if f not in row]
     if missing:
         raise ValueError(f"Missing features: {missing}")
-
     return pd.DataFrame([{f: row[f] for f in feature_list}])
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -818,20 +808,37 @@ st.divider()
 # Build shared feature row  (ML logic - unchanged)
 # ─────────────────────────────────────────────────────────────────────────────
 
+#updated this section. made it as 2 rows
 try:
-    feature_row = build_feature_row(
-        num_types=num_types,
-        hp=hp, attack=attack, defense=defense,
-        sp_attack=sp_attack, sp_defense=sp_defense, speed=speed,
-        height_m=height_m, weight_kg=weight_kg,
-        base_experience=base_experience, capture_rate=capture_rate,
-        base_happiness=base_happiness, hatch_counter=hatch_counter,
-        gender_rate=gender_rate,
-        primary_type=primary_type, secondary_type=secondary_type,
+    balance_feature_row = build_balance_risk_row(
+        hp=hp,
+        attack=attack,
+        defense=defense,
+        sp_attack=sp_attack,
+        sp_defense=sp_defense,
+        speed=speed,
     )
+
+    longevity_type_columns = models.get("type_columns")
+    if longevity_type_columns is None:
+        longevity_type_columns = [f"type_{t}" for t in ALL_TYPES]
+
+    longevity_feature_row = build_longevity_row(
+        hp=hp,
+        attack=attack,
+        defense=defense,
+        sp_attack=sp_attack,
+        sp_defense=sp_defense,
+        speed=speed,
+        primary_type=primary_type,
+        secondary_type=secondary_type,
+        type_columns=longevity_type_columns,
+    )
+
     feature_error = None
 except Exception as e:
-    feature_row = None
+    balance_feature_row = None
+    longevity_feature_row = None
     feature_error = str(e)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -841,11 +848,12 @@ except Exception as e:
 tab1, tab2 = st.tabs(["Balance Risk Prediction", "Competitive Longevity Prediction"])
 
 # ── Tab 1: Balance Risk ──────────────────────────────────────────────────────
+#updated this section to reflect the new unsupervised clustering approach and label mapping
 with tab1:
     st.markdown('<div class="section-title" style="margin-top:0.5rem;">Balance Risk Classification</div>', unsafe_allow_html=True)
     st.caption(
-        "Classifies whether this Pokemon is likely to be competitively balanced "
-        "or a high-risk pick in the meta. Powered by a trained sklearn Pipeline classifier."
+        "Groups this Pokemon into competitive balance clusters using an unsupervised model. "
+        "The prediction is based only on the six base stats."
     )
     st.markdown("")
 
@@ -854,44 +862,71 @@ with tab1:
     elif models["balance_risk"] is None:
         st.error(
             "Balance Risk model could not be loaded. "
-            "Ensure `models/best_balance_risk_model.joblib` exists in the project root."
+            "Ensure `models/balance_risk_kmeans.joblib` exists in the project root."
+        )
+    elif models["balance_label_map"] is None:
+        st.error(
+            "Balance label map could not be loaded. "
+            "Ensure `models/balance_label_map.joblib` exists in the project root."
         )
     else:
         if st.button("Run Balance Risk Prediction", type="primary"):
-            with st.spinner("Running classifier..."):
+            with st.spinner("Running balance-risk model..."):
                 try:
-                    X = align_features(feature_row, BALANCE_RISK_FEATURES, models["balance_risk"])
-                    prediction = models["balance_risk"].predict(X)[0]
-                    proba      = models["balance_risk"].predict_proba(X)[0]
+                    X = align_features(balance_feature_row, BALANCE_RISK_FEATURES)
 
-                    risk_class = int(prediction)
-                    confidence = float(proba[risk_class]) * 100
+                    if models["scaler"] is not None:
+                        X_used = models["scaler"].transform(X)
+                    else:
+                        X_used = X
+
+                    cluster_id = int(models["balance_risk"].predict(X_used)[0])
+                    predicted_label = models["balance_label_map"].get(cluster_id, "Unknown")
 
                     st.markdown('<div class="section-label" style="margin-top:1rem;">Verdict</div>', unsafe_allow_html=True)
 
-                    if risk_class == 0:
+                    if predicted_label == "Underpowered":
+                        render_result_card(
+                            "warning",
+                            "Underpowered",
+                            "Below typical competitive stat profile",
+                            "This Pokemon's six base stats place it in a lower-power cluster. "
+                            "It may struggle to keep up unless other battle factors compensate."
+                        )
+                        bar_color = "#F59E0B"
+
+                    elif predicted_label == "Normal":
                         render_result_card(
                             "success",
-                            "Balanced / Low Risk",
-                            "No significant balance concern detected",
-                            "This Pokemon's stat profile is consistent with a competitively balanced design. "
-                            "It is unlikely to dominate or destabilise the meta.",
+                            "Normal",
+                            "No major balance concern detected",
+                            "This Pokemon's six base stats fall into the normal cluster, "
+                            "suggesting a more balanced overall stat profile."
                         )
                         bar_color = "#22C55E"
-                    else:
+
+                    elif predicted_label == "Overpowered":
                         render_result_card(
                             "danger",
-                            "High Balance Risk",
-                            "Potential overpowered profile detected",
-                            "This Pokemon shows statistical patterns associated with overpowered or "
-                            "hard-to-counter competitive picks. It may require banning or tiering restrictions.",
+                            "Overpowered",
+                            "Potential high-power profile detected",
+                            "This Pokemon's six base stats place it in a high-power cluster "
+                            "that may indicate above-normal balance risk."
                         )
                         bar_color = "#EF4444"
 
-                    render_confidence_bar("Model Confidence in Predicted Class", confidence, bar_color)
+                    else:
+                        render_result_card(
+                            "info",
+                            "Unknown Cluster",
+                            "Cluster label not found",
+                            f"The model predicted cluster {cluster_id}, but no readable label was found in the saved label map."
+                        )
+                        bar_color = "#4F83FF"
 
-                    st.markdown('<div class="section-label" style="margin-top:1rem;">Class Probabilities</div>', unsafe_allow_html=True)
-                    render_prob_split(proba[0], proba[1])
+                    #removed the below line 
+                    #render_confidence_bar("Cluster ID", float(cluster_id), bar_color)
+                    st.caption(f"Predicted cluster ID: {cluster_id}")
 
                 except ValueError as e:
                     st.error(f"Feature alignment error: {e}")
@@ -902,26 +937,26 @@ with tab1:
 
     with st.expander("How this prediction works"):
         st.markdown(
-            "The Balance Risk model is a trained **sklearn Pipeline** (with internal preprocessing). "
-            "It was trained on historical Pokemon data and classifies each Pokemon into one of two categories:\n\n"
-            "| Class | Label |\n"
+            "The Balance Risk model now uses an **unsupervised clustering** approach rather than a supervised classifier.\n\n"
+            "It groups each Pokemon using only these six base stats:\n"
+            "- HP\n"
+            "- Attack\n"
+            "- Defense\n"
+            "- Sp. Attack\n"
+            "- Sp. Defense\n"
+            "- Speed\n\n"
+            "The predicted cluster is then mapped into one of three readable labels:\n\n"
+            "| Cluster label | Meaning |\n"
             "|---|---|\n"
-            "| 0 | Balanced / Low Risk |\n"
-            "| 1 | High Balance Risk |\n\n"
-            "The model uses 37 input features: base stats, physical attributes, game metadata, "
-            "and one-hot encoded type flags. Feature alignment is performed automatically using "
-            "`model.feature_names_in_` to prevent ordering errors."
+            "| Underpowered | Lower overall stat profile |\n"
+            "| Normal | Typical / balanced stat profile |\n"
+            "| Overpowered | Higher overall stat profile |"
         )
 
     with st.expander("Input features sent to this model"):
-        if feature_row is not None:
+        if balance_feature_row is not None:
             try:
-                model_features = (
-                    list(models["balance_risk"].feature_names_in_)
-                    if hasattr(models["balance_risk"], "feature_names_in_")
-                    else BALANCE_RISK_FEATURES
-                )
-                preview = {f: feature_row[f] for f in model_features if f in feature_row}
+                preview = {f: balance_feature_row[f] for f in BALANCE_RISK_FEATURES if f in balance_feature_row}
                 st.dataframe(
                     pd.DataFrame([preview]).T.rename(columns={0: "Value"}),
                     use_container_width=True,
@@ -933,15 +968,15 @@ with tab1:
 
     with st.expander("Model limitations"):
         st.markdown(
-            "- Trained on Generation 1–9 data. Hypothetical or future Pokemon may fall "
-            "outside the training distribution.\n"
-            "- Real competitive balance depends on movesets, abilities, and team synergies - "
-            "none of which are captured here.\n"
-            "- Treat predictions as a **supporting signal**, not a definitive ruling.\n"
-            "- Confidence scores are model-internal and do not account for meta evolution over time."
+            "- Uses only the six base stats, so it does not account for movesets, abilities, items, or team synergy.\n"
+            "- Cluster labels are interpretive summaries of unsupervised groups, not official competitive rulings.\n"
+            "- Hypothetical or future Pokemon may fall outside the training distribution.\n"
+            "- Treat predictions as a supporting signal, not a definitive ruling."
         )
 
 # ── Tab 2: Longevity ─────────────────────────────────────────────────────────
+#did few updates here
+
 with tab2:
     st.markdown('<div class="section-title" style="margin-top:0.5rem;">Competitive Longevity Regression</div>', unsafe_allow_html=True)
     st.caption(
@@ -955,13 +990,16 @@ with tab2:
     elif models["longevity"] is None:
         st.error(
             "Longevity model could not be loaded. "
-            "Ensure `models/longevity_regressor.joblib` exists in the project root."
+            
+            #updated the error message to reflect the new regression model
+            "Ensure `models/longevity_random_forest.joblib` exists in the project root."
         )
     else:
         if st.button("Run Longevity Prediction", type="primary"):
             with st.spinner("Running regressor..."):
                 try:
-                    X = align_features(feature_row, LONGEVITY_FEATURES, models["longevity"])
+                    #updated to use the new longevity feature set and handle potential missing features due to loading issues
+                    X = align_features(longevity_feature_row, LONGEVITY_FEATURES)
                     longevity_score = float(models["longevity"].predict(X)[0])
 
                     st.markdown('<div class="section-label" style="margin-top:1rem;">Result</div>', unsafe_allow_html=True)
@@ -1019,12 +1057,12 @@ with tab2:
 
     st.markdown("")
 
+    #updated the explanation to reflect the new regression model and the interpretation of the continuous score
     with st.expander("How this prediction works"):
         st.markdown(
             "The Longevity model is a **Random Forest Regressor** trained to estimate "
             "a Pokemon's expected competitive lifespan.\n\n"
-            "It uses 40 input features: base stats, physical attributes, game metadata, "
-            "type one-hot flags, plus `stat_efficiency` and `type_coverage` as derived features.\n\n"
+            "It uses the six base stats plus one-hot encoded type information.\n\n"
             "**Score interpretation guide:**\n\n"
             "| Score | Interpretation |\n"
             "|---|---|\n"
@@ -1034,14 +1072,10 @@ with tab2:
         )
 
     with st.expander("Input features sent to this model"):
-        if feature_row is not None:
+        #updated to reflect the new feature set and potential for missing features due to loading issues
+        if longevity_feature_row is not None:
             try:
-                model_features = (
-                    list(models["longevity"].feature_names_in_)
-                    if hasattr(models["longevity"], "feature_names_in_")
-                    else LONGEVITY_FEATURES
-                )
-                preview = {f: feature_row[f] for f in model_features if f in feature_row}
+                preview = {f: longevity_feature_row[f] for f in LONGEVITY_FEATURES if f in longevity_feature_row}
                 st.dataframe(
                     pd.DataFrame([preview]).T.rename(columns={0: "Value"}),
                     use_container_width=True,
