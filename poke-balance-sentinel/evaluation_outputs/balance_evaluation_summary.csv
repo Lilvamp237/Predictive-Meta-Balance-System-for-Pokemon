@@ -1,0 +1,5 @@
+Metric,Value
+Total Samples,1025.0
+Normal Count,953.0
+Anomaly Count,72.0
+6-stat Silhouette Score,0.3252
