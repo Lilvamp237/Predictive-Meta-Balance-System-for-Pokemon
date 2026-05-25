@@ -53,10 +53,11 @@ def load_models():
     models = {}
 
     paths = {
-        "balance_risk": ROOT / "models" / "balance_risk_kmeans.joblib",
+        #updated the balance risk model path to reflect the new unsupervised pipeline
+        "balance_risk": ROOT / "models" / "unsupervised_balance_risk_pipeline.joblib",
         "balance_label_map": ROOT / "models" / "balance_label_map.joblib",
-        "longevity": ROOT / "models" / "longevity_random_forest.joblib",
-        "scaler": ROOT / "models" / "scaler.joblib",
+        "longevity": ROOT / "models" / "longevity_RandomForest.joblib",
+        "scaler": ROOT / "models" / "pokemon_scaler.joblib",
         "type_columns": ROOT / "models" / "type_columns.joblib",
     }
 
