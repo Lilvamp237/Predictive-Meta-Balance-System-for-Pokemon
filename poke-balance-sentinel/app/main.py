@@ -52,22 +52,35 @@ def load_models():
 
     models = {}
 
-    paths = {
-        #updated the balance risk model path to reflect the new unsupervised pipeline
+    required_paths = {
         "balance_risk": ROOT / "models" / "unsupervised_balance_risk_pipeline.joblib",
-        "balance_label_map": ROOT / "models" / "balance_label_map.joblib",
         "longevity": ROOT / "models" / "longevity_RandomForest.joblib",
+    }
+
+    optional_paths = {
+        "balance_label_map": ROOT / "models" / "balance_label_map.joblib",
         "scaler": ROOT / "models" / "pokemon_scaler.joblib",
         "type_columns": ROOT / "models" / "type_columns.joblib",
     }
 
-    for key, path in paths.items():
+    for key, path in required_paths.items():
         if path.exists():
             try:
                 models[key] = joblib.load(path)
             except Exception as e:
                 models[key] = None
-                st.error(f"Failed to load {path.name}: {e}")
+                st.error(f"Failed to load required model {path.name}: {e}")
+        else:
+            models[key] = None
+            st.error(f"Required model file not found: {path.name}")
+
+    for key, path in optional_paths.items():
+        if path.exists():
+            try:
+                models[key] = joblib.load(path)
+            except Exception as e:
+                models[key] = None
+                st.warning(f"Optional file could not be loaded: {path.name} ({e})")
         else:
             models[key] = None
 
@@ -121,13 +134,50 @@ def build_longevity_row(
 
     return row
 
-#removed the old align_features
-#this align features trying to explicitly control the inputs to fix the leakage-related design changes.
-def align_features(row: dict, feature_list: list) -> pd.DataFrame:
+#updated
+def align_features(row: dict, feature_list: list, model=None) -> pd.DataFrame:
+    try:
+        if model is not None:
+            if hasattr(model, "feature_names_in_"):
+                feature_list = list(model.feature_names_in_)
+            elif hasattr(model, "steps"):
+                for _, step in model.steps:
+                    if hasattr(step, "feature_names_in_"):
+                        feature_list = list(step.feature_names_in_)
+                        break
+    except Exception:
+        pass
+
     missing = [f for f in feature_list if f not in row]
     if missing:
         raise ValueError(f"Missing features: {missing}")
+
     return pd.DataFrame([{f: row[f] for f in feature_list}])
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Updated: Model schema inspection helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+# These helpers are used only to verify that the saved .joblib artifacts match
+# the revised assignment setup:
+# - Balance risk: unsupervised model using only the 6 base stats
+# - Longevity: Random Forest using 6 base stats + one-hot encoded Types
+def get_model_expected_features(model):
+    try:
+        if model is None:
+            return None
+
+        if hasattr(model, "feature_names_in_"):
+            return list(model.feature_names_in_)
+
+        if hasattr(model, "steps"):
+            for _, step in model.steps:
+                if hasattr(step, "feature_names_in_"):
+                    return list(step.feature_names_in_)
+
+        return None
+    except Exception:
+        return None
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Page config
@@ -647,6 +697,17 @@ def render_stat_cards(bst: int, off: int, deff: int, bmi_val: float, eff: float)
 models = load_models()
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Updated:Saved-model schema checks
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Important:
+# We rely on the saved .joblib artifacts being the retrained FINAL versions.
+# This check helps confirm whether the loaded models still expect the old
+# broader feature-engineering pipeline or the revised final feature sets.
+balance_expected_features = get_model_expected_features(models.get("balance_risk"))
+longevity_expected_features = get_model_expected_features(models.get("longevity"))
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Sidebar
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -692,6 +753,19 @@ with st.sidebar:
             """,
             unsafe_allow_html=True,
         )
+
+    with st.expander("Loaded model schema check"):
+        if balance_expected_features is not None:
+            st.caption(f"Balance Risk expected feature count: {len(balance_expected_features)}")
+            st.code(", ".join(balance_expected_features), language="text")
+        else:
+            st.caption("Balance Risk feature schema could not be read from the saved artifact.")
+
+        if longevity_expected_features is not None:
+            st.caption(f"Longevity expected feature count: {len(longevity_expected_features)}")
+            st.code(", ".join(longevity_expected_features), language="text")
+        else:
+            st.caption("Longevity feature schema could not be read from the saved artifact.")
 
     st.divider()
 
@@ -843,13 +917,31 @@ except Exception as e:
     feature_error = str(e)
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Updated: Assignment consistency warnings
+# ─────────────────────────────────────────────────────────────────────────────
+
+# If these warnings appear, the saved .joblib files likely do not match the
+# final retrained models required for the revised assignment.
+if balance_expected_features is not None and set(balance_expected_features) != set(BALANCE_RISK_FEATURES):
+    st.warning(
+        "The loaded Balance Risk model does not match the expected revised 6-feature schema. "
+        "This usually means the saved .joblib file is an older artifact and should be re-exported."
+    )
+
+expected_longevity_feature_set = set(LONGEVITY_FEATURES)
+if longevity_expected_features is not None and set(longevity_expected_features) != expected_longevity_feature_set:
+    st.warning(
+        "The loaded Longevity model does not match the expected revised feature schema "
+        "(6 base stats + one-hot encoded Types). "
+        "This usually means the saved .joblib file is an older artifact and should be re-exported."
+    )
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Prediction tabs
 # ─────────────────────────────────────────────────────────────────────────────
 
 tab1, tab2 = st.tabs(["Balance Risk Prediction", "Competitive Longevity Prediction"])
 
-# ── Tab 1: Balance Risk ──────────────────────────────────────────────────────
-#updated this section to reflect the new unsupervised clustering approach and label mapping
 with tab1:
     st.markdown('<div class="section-title" style="margin-top:0.5rem;">Balance Risk Classification</div>', unsafe_allow_html=True)
     st.caption(
@@ -863,18 +955,14 @@ with tab1:
     elif models["balance_risk"] is None:
         st.error(
             "Balance Risk model could not be loaded. "
-            "Ensure `models/balance_risk_kmeans.joblib` exists in the project root."
-        )
-    elif models["balance_label_map"] is None:
-        st.error(
-            "Balance label map could not be loaded. "
-            "Ensure `models/balance_label_map.joblib` exists in the project root."
+            "Ensure `models/unsupervised_balance_risk_pipeline.joblib` exists in the project root."
         )
     else:
         if st.button("Run Balance Risk Prediction", type="primary"):
             with st.spinner("Running balance-risk model..."):
                 try:
-                    X = align_features(balance_feature_row, BALANCE_RISK_FEATURES)
+                    X = align_features(balance_feature_row, BALANCE_RISK_FEATURES, 
+                    models["balance_risk"])
 
                     if models["scaler"] is not None:
                         X_used = models["scaler"].transform(X)
@@ -882,7 +970,12 @@ with tab1:
                         X_used = X
 
                     cluster_id = int(models["balance_risk"].predict(X_used)[0])
-                    predicted_label = models["balance_label_map"].get(cluster_id, "Unknown")
+
+                    label_map = models.get("balance_label_map")
+                    if label_map is not None:
+                        predicted_label = label_map.get(cluster_id, "Unknown")
+                    else:
+                        predicted_label = "Unknown"
 
                     st.markdown('<div class="section-label" style="margin-top:1rem;">Verdict</div>', unsafe_allow_html=True)
 
@@ -894,7 +987,6 @@ with tab1:
                             "This Pokemon's six base stats place it in a lower-power cluster. "
                             "It may struggle to keep up unless other battle factors compensate."
                         )
-                        bar_color = "#F59E0B"
 
                     elif predicted_label == "Normal":
                         render_result_card(
@@ -904,7 +996,6 @@ with tab1:
                             "This Pokemon's six base stats fall into the normal cluster, "
                             "suggesting a more balanced overall stat profile."
                         )
-                        bar_color = "#22C55E"
 
                     elif predicted_label == "Overpowered":
                         render_result_card(
@@ -914,20 +1005,23 @@ with tab1:
                             "This Pokemon's six base stats place it in a high-power cluster "
                             "that may indicate above-normal balance risk."
                         )
-                        bar_color = "#EF4444"
 
                     else:
                         render_result_card(
                             "info",
-                            "Unknown Cluster",
-                            "Cluster label not found",
-                            f"The model predicted cluster {cluster_id}, but no readable label was found in the saved label map."
+                            "Cluster predicted",
+                            "Readable label unavailable",
+                            f"The model predicted cluster {cluster_id}. "
+                            "A saved cluster-to-label mapping was not available, so only the raw cluster ID can be shown."
                         )
-                        bar_color = "#4F83FF"
 
-                    #removed the below line 
-                    #render_confidence_bar("Cluster ID", float(cluster_id), bar_color)
                     st.caption(f"Predicted cluster ID: {cluster_id}")
+
+                    if label_map is None:
+                        st.info(
+                            "Optional label map file was not found, so the app cannot translate "
+                            "the cluster ID into Underpowered / Normal / Overpowered labels."
+                        )
 
                 except ValueError as e:
                     st.error(f"Feature alignment error: {e}")
@@ -946,7 +1040,7 @@ with tab1:
             "- Sp. Attack\n"
             "- Sp. Defense\n"
             "- Speed\n\n"
-            "The predicted cluster is then mapped into one of three readable labels:\n\n"
+            "The predicted cluster is then mapped into one of three readable labels when a saved label map is available:\n\n"
             "| Cluster label | Meaning |\n"
             "|---|---|\n"
             "| Underpowered | Lower overall stat profile |\n"
@@ -971,6 +1065,7 @@ with tab1:
         st.markdown(
             "- Uses only the six base stats, so it does not account for movesets, abilities, items, or team synergy.\n"
             "- Cluster labels are interpretive summaries of unsupervised groups, not official competitive rulings.\n"
+            "- If the saved label map is unavailable, only the raw cluster ID can be shown.\n"
             "- Hypothetical or future Pokemon may fall outside the training distribution.\n"
             "- Treat predictions as a supporting signal, not a definitive ruling."
         )
@@ -993,14 +1088,14 @@ with tab2:
             "Longevity model could not be loaded. "
             
             #updated the error message to reflect the new regression model
-            "Ensure `models/longevity_random_forest.joblib` exists in the project root."
+            "Ensure `models/longevity_RandomForest.joblib` exists in the project root."
         )
     else:
         if st.button("Run Longevity Prediction", type="primary"):
             with st.spinner("Running regressor..."):
                 try:
-                    #updated to use the new longevity feature set and handle potential missing features due to loading issues
-                    X = align_features(longevity_feature_row, LONGEVITY_FEATURES)
+                    #updated 
+                    X = align_features(longevity_feature_row, LONGEVITY_FEATURES, models["longevity"])
                     longevity_score = float(models["longevity"].predict(X)[0])
 
                     st.markdown('<div class="section-label" style="margin-top:1rem;">Result</div>', unsafe_allow_html=True)
